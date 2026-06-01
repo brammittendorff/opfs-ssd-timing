@@ -1,0 +1,7 @@
+numpy
+scipy
+scikit-learn
+matplotlib
+pandas
+# torch is only needed for train_cnn.py; install separately if you want the CNN:
+#   pip install torch

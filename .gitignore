@@ -1,0 +1,14 @@
+# Python
+analysis/.venv/
+__pycache__/
+*.pyc
+
+# Generated analysis artifacts
+analysis/*.png
+analysis/*.jsonl
+
+# OPFS load scratch (created by the playwright disk-load helper)
+.frostload/
+
+# Captured datasets / traces live in ~/Downloads, not the repo
+*.csv

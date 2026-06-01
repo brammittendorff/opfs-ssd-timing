@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FROST PoC - OPFS SSD timing</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    margin: 0; padding: 24px; background: #0d1117; color: #c9d1d9;
+    max-width: 1000px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #8b949e; margin: 0 0 20px; }
+  .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #30363d; }
+  .ok   { background: #0f2417; border-color: #1f6f3f; }
+  .bad  { background: #2d1416; border-color: #8b2c2c; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
+  .capture { border-top: 1px solid #21262d; padding-top: 16px; }
+  label.check { flex-direction: row; align-items: center; gap: 6px; }
+  label.check input { width: auto; }
+  .capstatus { align-self: center; color: #8b949e; font-size: 12px; }
+  .capstatus.rec { color: #f0883e; }
+  .capstatus.ready { color: #3fb950; }
+  .capcounts { color: #8b949e; font-size: 12px; margin: -4px 0 16px; min-height: 16px; }
+  .capcounts b { color: #58a6ff; }
+  label { display: flex; flex-direction: column; gap: 4px; color: #8b949e; font-size: 12px; }
+  input, select { width: 90px; padding: 6px; background: #161b22; border: 1px solid #30363d;
+          color: #c9d1d9; border-radius: 6px; font: inherit; }
+  select { width: auto; }
+  button { padding: 8px 14px; background: #238636; border: 0; color: #fff;
+           border-radius: 6px; cursor: pointer; font: inherit; }
+  button.secondary { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  canvas { width: 100%; height: 280px; background: #161b22; border: 1px solid #30363d;
+           border-radius: 8px; display: block; }
+  .stats { display: flex; gap: 24px; margin: 12px 0; flex-wrap: wrap; }
+  .stat b { color: #58a6ff; font-size: 18px; }
+  .stat span { color: #8b949e; font-size: 12px; display: block; }
+  #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+         padding: 12px; height: 170px; overflow-y: auto; white-space: pre-wrap;
+         font-size: 12px; color: #8b949e; }
+  .note { color: #8b949e; font-size: 12px; margin-top: 16px; border-top: 1px solid #21262d; padding-top: 12px; }
+  code { color: #d2a8ff; }
+</style>
+</head>
+<body>
+  <h1>FROST PoC - SSD contention from JavaScript via OPFS</h1>
+  <p class="sub">Times random 4 kB reads on a large OPFS file. When something else
+     touches the same SSD, read latency spikes. Local research use only.</p>
+
+  <div id="banner" class="banner">Checking environment...</div>
+
+  <div class="controls">
+    <label>Grow step (GB)<input id="stepGB" type="number" value="2" min="1" step="1"></label>
+    <label>Knee threshold (us)<input id="threshUs" type="number" value="25" min="1" step="1"></label>
+    <label>Max size (GB)<input id="maxGB" type="number" value="60" min="4" step="1"></label>
+    <label>Read size (kB)<input id="readKB" type="number" value="4" min="4" step="4"></label>
+    <label>Channel<select id="channel">
+      <option value="read">read (large-file knee)</option>
+      <option value="flush">write-flush (RAM-independent)</option>
+    </select></label>
+    <button id="build">Build &amp; calibrate</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+    <button id="reset" class="secondary">Reset (delete OPFS file)</button>
+    <button id="csv" class="secondary" disabled>Export CSV</button>
+  </div>
+
+  <div class="controls capture">
+    <label>Activity label<input id="capLabel" type="text" value="idle" style="width:160px"></label>
+    <label>Window (s)<input id="capWindow" type="number" value="8" min="1" step="1"></label>
+    <label class="check">Raw (no spike filter)
+      <input id="capRaw" type="checkbox" checked></label>
+    <button id="record" disabled>Record</button>
+    <button id="exportDS" class="secondary" disabled>Export dataset (JSONL)</button>
+    <span id="capStatus" class="capstatus">build &amp; calibrate first</span>
+  </div>
+  <div id="capCounts" class="capcounts"></div>
+
+  <canvas id="chart" width="1900" height="560"></canvas>
+
+  <div class="stats">
+    <div class="stat"><b id="sMedian">-</b><span>median us</span></div>
+    <div class="stat"><b id="sP95">-</b><span>p95 us</span></div>
+    <div class="stat"><b id="sRate">-</b><span>samples/sec</span></div>
+    <div class="stat"><b id="sSize">-</b><span>file size</span></div>
+    <div class="stat"><b id="sTotal">-</b><span>samples kept</span></div>
+  </div>
+
+  <div id="log"></div>
+
+  <p class="note">
+    <b>What to try:</b> after calibration finishes and the chart settles, launch a heavy
+    app or open a site in another window - watch the spikes appear. Then leave it idle and
+    watch them fade. <br>
+    <b>Mitigation (from the paper):</b> capping OPFS to ~1 GB makes the file fit in
+    RAM, so reads are served from the page cache and the channel disappears.
+    Requires <code>crossOriginIsolated</code> for high-res timers (set via COOP/COEP in
+    <code>serve.py</code>). <br>
+    <b>Firefox:</b> OPFS is capped at ~10 GB, so the <b>read</b> channel only works if that
+    exceeds your free RAM. On high-RAM machines pick the <b>write-flush</b> channel, which
+    times <code>flush()</code> (forced SSD writeback) and needs no large file.
+  </p>
+
+  <script src="main.js"></script>
+</body>
+</html>
