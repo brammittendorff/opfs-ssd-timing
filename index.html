@@ -57,9 +57,12 @@
     <label>Knee threshold (us)<input id="threshUs" type="number" value="25" min="1" step="1"></label>
     <label>Max size (GB)<input id="maxGB" type="number" value="60" min="4" step="1"></label>
     <label>Read size (kB)<input id="readKB" type="number" value="4" min="4" step="4"></label>
+    <label>Buffer (MB)<input id="bufMB" type="number" value="8" min="1" step="1"></label>
+    <label class="check">auto-size<input id="bufAuto" type="checkbox" checked></label>
     <label>Channel<select id="channel">
-      <option value="read">read (large-file knee)</option>
-      <option value="flush">write-flush (RAM-independent)</option>
+      <option value="read">read - disk (Chrome/Firefox)</option>
+      <option value="cache">cache-occupancy - CPU/memory (any browser)</option>
+      <option value="flush">write-flush - disk (Firefox only)</option>
     </select></label>
     <button id="build">Build &amp; calibrate</button>
     <button id="stop" class="secondary" disabled>Stop</button>
@@ -91,16 +94,40 @@
   <div id="log"></div>
 
   <p class="note">
-    <b>What to try:</b> after calibration finishes and the chart settles, launch a heavy
-    app or open a site in another window - watch the spikes appear. Then leave it idle and
-    watch them fade. <br>
-    <b>Mitigation (from the paper):</b> capping OPFS to ~1 GB makes the file fit in
-    RAM, so reads are served from the page cache and the channel disappears.
-    Requires <code>crossOriginIsolated</code> for high-res timers (set via COOP/COEP in
-    <code>serve.py</code>). <br>
-    <b>Firefox:</b> OPFS is capped at ~10 GB, so the <b>read</b> channel only works if that
-    exceeds your free RAM. On high-RAM machines pick the <b>write-flush</b> channel, which
-    times <code>flush()</code> (forced SSD writeback) and needs no large file.
+    <b>What to try:</b> after <b>Build &amp; calibrate</b> finishes and the chart settles,
+    cause some activity in another window - open a website, launch a heavy app, or copy a
+    big file - and watch the spikes appear; leave it idle and watch them fade.<br><br>
+
+    <b>Three channels - three shared resources you can time</b> (pick one in the
+    <b>Channel</b> dropdown). They sense <i>different</i> things and some are
+    browser-dependent:
+    <br><b>1. read</b> - <i>senses DISK activity.</i> Grows an OPFS file until random
+    4&nbsp;kB reads stop being served from RAM and start hitting the SSD, then times those
+    reads. The paper's method; strongest of the three (a competing disk write collapses its
+    read throughput). <b>Works in Chrome and Firefox</b>, but needs the OPFS quota to exceed
+    free RAM - otherwise the file stays cached and there is no knee (Firefox caps the quota
+    at ~10&nbsp;GB).
+    <br><b>2. cache-occupancy</b> - <i>senses CPU / memory / WEBSITE activity</i> (a
+    different resource: the CPU's last-level cache). No file at all: it sweeps a buffer
+    ~the size of your LLC as a randomized pointer-chase and times the sweep; when anything
+    else touches the cache, the sweep slows. Leave <b>auto-size</b> checked and it finds
+    your LLC for you. The <b>median</b> sweep time is the signal here. <b>Works in Chrome
+    and Firefox</b>, zero setup - the portable default for sensing apps/sites.
+    <br><b>3. write-flush</b> - <i>senses DISK writeback, but only on browsers where
+    <code>flush()</code> really fsyncs.</i> Writes 4&nbsp;kB and times
+    <code>handle.flush()</code>. <b>Works in Firefox</b> (flush forces a real ~hundreds-of-us
+    writeback, so it detects disk writes with no big file needed). <b>On Chrome it does
+    NOT work</b> - Chrome's <code>flush()</code> is a no-op (~5&nbsp;us, no fsync), so it
+    senses no disk. Use it on Firefox when the quota is too small for the read channel.<br><br>
+
+    <b>In short:</b> for <b>disk</b> events use <b>read</b> (any browser) or
+    <b>write-flush</b> (Firefox); for <b>CPU / memory / websites</b> use
+    <b>cache-occupancy</b> (any browser).<br><br>
+
+    <b>Mitigation (from the paper):</b> capping OPFS to ~1 GB makes the file fit in RAM, so
+    reads stay cache-served and the read channel disappears. All channels need
+    <code>crossOriginIsolated</code> for the high-res timer (set via COOP/COEP in
+    <code>serve.py</code>); opening the HTML as a <code>file://</code> will not work.
   </p>
 
   <script src="main.js"></script>

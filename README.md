@@ -6,16 +6,29 @@ A local, self-contained proof-of-concept of the core mechanism from
 
 [FROST](https://hannesweissteiner.com/pdfs/frost.pdf)
 
-Pure JavaScript in a browser tab measures **SSD contention** by timing random reads on
-a large [OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)
-file. No native code, no exploit, no permission prompt. When anything else on the
-machine touches the same SSD (you open a site, launch an app, copy a file), read latency
+Pure JavaScript in a browser tab measures **hardware contention** by timing a shared
+resource. No native code, no exploit, no permission prompt. When anything else on the
+machine touches that resource (you open a site, launch an app, copy a file), the timing
 spikes - and you watch it live.
+
+It offers **three channels** - three different shared resources you can time. They sense
+different things, and some are browser-dependent (see [Channels](#channels)):
+
+1. **read** - senses **disk** activity. Time random 4 kB reads on a large
+   [OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)
+   file once it exceeds free RAM and reads hit the SSD. The paper's method; strongest
+   channel. Works in **Chrome and Firefox** (needs OPFS quota > free RAM).
+2. **cache-occupancy** - senses **CPU / memory / website** activity. No file at all: time
+   a sweep of an LLC-sized buffer (the Shusterman et al. 2019 channel). Works in **Chrome
+   and Firefox**, zero setup - the portable default.
+3. **write-flush** - senses **disk** writeback, but only where `flush()` truly fsyncs:
+   **works on Firefox**, is a **no-op on Chrome**. Needs no big file.
 
 This PoC implements the **live contention monitor**, plus a **labeled-capture harness**
 and an **offline fingerprinting pipeline** (see [Fingerprinting](#fingerprinting-capture--offline-training))
-that takes a first step toward the paper's CNN classification stage. It does **not**
-include the covert channel.
+that takes a first step toward the paper's CNN classification stage, and a
+[**test suite**](tests/) that drives each channel end-to-end and checks it detects
+contention and fingerprints a website. It does **not** include the covert channel.
 
 > For testing on your own hardware, for research/education. Don't deploy against others.
 
@@ -57,8 +70,7 @@ big enough.
 ## Run
 
 ```sh
-cd poc-opfs
-python3 serve.py            # serves http://localhost:8000 with COOP/COEP headers
+python3 serve.py            # from the repo root; serves http://localhost:8000 with COOP/COEP headers
 ```
 
 Open **http://localhost:8000** in Google Chrome (recommended) or Firefox.
@@ -77,9 +89,10 @@ Open **http://localhost:8000** in Google Chrome (recommended) or Firefox.
 
 1. The banner should read `crossOriginIsolated: true`, show a sub-us timer resolution, and
    (once probed) the OPFS quota. If it's red, you opened it wrong (not via `serve.py`).
-2. Pick a **Channel** (leave it on `read` for Chrome). Click **Build & calibrate**. In
-   `read` mode the worker grows an OPFS file 2 GB at a time and, after
-   each step, probes read latency:
+2. Pick a **Channel** (see [Channels](#channels) - `cache-occupancy` is the zero-setup
+   option that works on any machine; `read` is the paper's method but needs OPFS quota >
+   free RAM). Click **Build & calibrate**. In `read` mode the worker grows an OPFS file
+   2 GB at a time and, after each step, probes read latency:
    - While the file fits in the OS page cache, the median stays at DRAM speed (a few us).
    - Once the file exceeds available cache, the median **jumps** to SSD speed (tens-
      hundreds of us). That knee is detected and **filling stops automatically** - you
@@ -98,7 +111,9 @@ Open **http://localhost:8000** in Google Chrome (recommended) or Firefox.
 | Knee threshold (us) | median latency that counts as "now hitting the SSD" |
 | Max size (GB) | safety cap; stops growing here even without a clear knee (auto-clamped to the OPFS quota) |
 | Read size (kB) | per-read size (4 kB matches the paper) |
-| Channel | `read` (large-file knee) or `write-flush` (RAM-independent); see below |
+| Buffer (MB) | cache-occupancy channel only: working-set size to sweep, ~your CPU's LLC. Ignored when **auto-size** is checked (the default) - the worker probes for your LLC and fills this in |
+| auto-size | cache-occupancy only: probe geometric buffer sizes for the LLC and pick the most sensitive one automatically (on by default, so you don't hand-tune per machine) |
+| Channel | `read` (large-file knee), `write-flush` (RAM-independent), or `cache-occupancy` (LLC, no file); see below |
 
 **Negative control:** set Max size below your free RAM (e.g. 8 GB on a 30 GB machine).
 Calibration won't find a knee, reads stay cache-served, and disk activity barely shows -
@@ -106,17 +121,59 @@ confirming the large-file requirement is what makes the read-latency attack work
 
 ### Channels
 
-| Channel | Probe | Needs file > RAM? | Use when |
-|---------|-------|-------------------|----------|
-| **read** (default) | time random 4 kB reads | **yes** | Chrome, or any box where the file can exceed free RAM. The paper's method. |
-| **write-flush** | write 4 kB, time `handle.flush()` (forced SSD writeback) | **no** | Firefox's 10 GB cap, or high-RAM machines where the file stays cached. Costs extra SSD writes. |
+There are **three channels** - three different shared resources you can time. They sense
+different things, and write-flush is **browser-dependent**. Pick one in the Channel dropdown:
+
+| Channel | Times | Senses | Works on | Needs |
+|---------|-------|--------|----------|-------|
+| **read** (default) | random 4 kB reads on a >RAM OPFS file | **disk** I/O | **Chrome + Firefox** | OPFS quota > free RAM (to reach the SSD); Firefox caps quota ~10 GB |
+| **cache-occupancy** | a sweep of an LLC-sized buffer (pointer-chase) | **CPU / memory / website** | **Chrome + Firefox** | nothing - no file; **auto-size** finds your LLC |
+| **write-flush** | `handle.flush()` after a 4 kB write | **disk** writeback | **Firefox only** | a browser whose `flush()` truly fsyncs |
+
+**Which channel for which activity (measured by [`tests/`](tests/), not assumed):**
+
+- **read** detects sustained disk I/O dramatically - its read throughput collapses ~95%
+  under a `dd` write - and fingerprints a heavy site (wired.com) at ~93%. It needs the OPFS
+  quota to exceed free RAM, or reads stay cache-served and there's no knee.
+- **cache-occupancy** lights up on CPU/memory contention (sweep median ~×1.4 under
+  CPU/LLC-thrash) and fingerprints wired.com at ~83%. Zero setup, any browser - the
+  portable default for sensing apps/sites.
+- **write-flush is browser-dependent.** On **Firefox** its `flush()` forces a real
+  ~hundreds-of-µs disk writeback, so it detects disk writes (median ~×1.34 under `dd`, no
+  big file needed) - this is its intended niche when the quota is too small for `read`. On
+  **Chrome** `flush()` is a **no-op** (~5 µs, no fsync per
+  [MDN](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemSyncAccessHandle/flush) /
+  the [Chromium source](https://chromium.googlesource.com/chromium/src/+/220d5e676a4a9e8d501d293c22256bde6320e50a%5E!/)),
+  so it senses no disk there and is best avoided.
+
+**In one line:** for *disk* events use **read** (any browser) or **write-flush** (Firefox);
+for *CPU/memory/websites* use **cache-occupancy** (any browser).
+
+The **cache-occupancy** channel (Shusterman et al., USENIX Security 2019) is the same
+trace -> classifier shape as FROST on a different resource. It allocates a buffer ~the
+size of the CPU's last-level cache and walks every cache line as a randomized
+**pointer-chase** - each load's address depends on the previous one, which defeats the
+hardware prefetcher and serializes the loads so the whole buffer must stay resident.
+When another process touches the cache and evicts the buffer's lines, the sweep slows.
+Unlike the SSD channels (where the median is flat and the signal lives in throughput /
+the tail), here the **median sweep time itself is the primary signal** - the offline
+RandomForest already exposes `median`/`mean` features, so cache captures separate with
+no pipeline changes. The sensitive regime is when idle sweeps are *cache-resident* (fast);
+if the buffer **exceeds** the LLC every access misses to DRAM, the channel saturates, and
+contention barely moves it. The right size is therefore per-machine, so **auto-size** (on
+by default) probes geometric buffer sizes, watches per-line sweep latency jump as it spills
+out of cache, and picks the largest size still in the fast regime - no hand-tuning. Uncheck
+it to set **Buffer (MB)** yourself. (Measured: on a small-LLC box an 8 MB buffer sat at
+~17 ms/sweep all-miss and showed no contrast; auto-size dropped to ~1-2 MB and gave a clean
+median rise + throughput collapse when competing tabs opened.)
 
 The read channel's signal is read latency (and its throughput / spike-rate / tail). The
-write-flush channel measures writeback latency instead, so contention shows even on a
-small, fully-cached file - at the cost of continuous small writes (more SSD wear). Note
-that the read channel's *throughput* still dips under another process's writes even when
-the file is cache-served, so on Firefox a write-heavy target may show up on either channel.
-Captured recordings record which `channel` produced them.
+write-flush channel times `flush()` instead - **but only on a browser where `flush()` is a
+real fsync does that reflect the SSD.** On Firefox it is (idle flush ~480 µs, rising under a
+`dd` write), so write-flush surfaces disk contention with no big file - useful when the
+quota is below RAM. On Chrome `flush()` returns in ~5 µs without touching the disk, so the
+channel has no disk signal there (only a faint CPU-scheduling effect on its write-loop
+throughput). Captured recordings record which `channel` produced them.
 
 ## Fingerprinting (capture + offline training)
 
@@ -193,6 +250,37 @@ leave-one-out on spike_rate: 4/4
 > many before reading their accuracy. The per-feature check above is the right tool while
 > the dataset is small.
 
+## Tests
+
+[`tests/`](tests/) drives each channel end-to-end in a headless browser (Playwright) and
+checks two things per channel: (1) it **detects contention** - idle vs a heavy load (`dd`
+disk writes for the SSD channels, CPU/LLC-thrash tabs for cache-occupancy); and (2) it can
+**fingerprint a website** - collect labeled idle-vs-`nu.nl` windows, train the RandomForest,
+and report accuracy with a shuffled-label control so the number isn't a fluke.
+
+```sh
+python3 serve.py 8011 &                                   # serve for the tests
+cd <playwright-skill> && CHANNEL=cache N_WIN=18 node run.js .../tests/channel_probe.js
+python3 tests/analyze.py cache                            # contention + classifier verdict
+```
+
+![three channels: contention + website fingerprint](tests/results.png)
+
+Measured findings (one Linux VM; numbers are environment-specific) - see
+[`tests/README.md`](tests/README.md):
+
+| channel | detects contention | fingerprints wired.com |
+|---|---|---|
+| **read** | ✅ `dd` write: throughput −82…−95% | ✅ **93% ±9%** (control 47%) |
+| **cache-occupancy** | ✅ CPU/LLC-thrash: median ×4.3 | ✅ **83% ±13%** (control 50%) |
+| **write-flush (Firefox)** | ✅ `dd` write: median ×1.34 | (disk channel - use `read`/`cache` to fingerprint) |
+| **write-flush (Chrome)** | ❌ `flush()` is a no-op | ✅ 83% but only via a faint CPU effect |
+
+The story is per-resource and per-browser: `read` = disk (any browser), `cache-occupancy`
+= CPU/memory/website (any browser), `write-flush` = disk **only on Firefox** (where
+`flush()` fsyncs). A light site (nu.nl) sits near the noise floor for the disk channels
+(read ~66%); a heavy site (wired.com) is well above it (read 93%).
+
 ## How it works
 
 - `serve.py` - stdlib HTTP server adding `Cross-Origin-Opener-Policy: same-origin` and
@@ -202,7 +290,11 @@ leave-one-out on spike_rate: 4/4
   bytes (zero/sparse pages would be cache-served and deduped, flushing each chunk to bound
   dirty memory), detects the page-cache knee, then loops timing random 4 kB reads. In
   `write-flush` mode it skips the big file and instead times `handle.flush()` after a small
-  write. Applies the paper's spike filter (samples > 1 ms replaced by the local mean) -
+  write - which only reflects the SSD on a browser where `flush()` is a real fsync (Firefox;
+  a no-op on Chrome). In `cache-occupancy` mode it uses no file at all: it **auto-sizes** a buffer to
+  the LLC (probing for the spill point), links its cache lines into one random pointer-chase
+  cycle, and times a full sweep of it.
+  Applies the paper's spike filter (samples > 1 ms replaced by the local mean) -
   **toggleable** via `setFilter` so capture can record the raw signal. Re-opening an
   already-calibrated file skips the fill; quota errors are caught.
 - `index.html` + `main.js` - environment check, controls, a dependency-free `<canvas>`

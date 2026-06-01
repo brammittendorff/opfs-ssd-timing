@@ -35,6 +35,14 @@ pip install torch        # only for train_cnn.py
 Start with a two-class **idle vs active** set to validate the pipeline end-to-end,
 then expand to websites / apps / file-ops.
 
+**Cache-occupancy captures** load with no changes - each recording carries its
+`channel` (`"cache"`) and the same `lat_us` (here, sweep times). One difference in the
+signal: for the cache channel the **sweep-time `median`/`mean` is the strong feature**
+(the opposite of FROST, where the median is flat), and `zero_frac` goes dead. The
+RandomForest baseline already exposes `median`/`mean`, so it separates cache classes as
+is; re-tuning `features.CNN_CHANNELS` to lead with `median`/`mean` for cache traces is a
+worthwhile follow-up but isn't required to get results.
+
 ## Analyze / train
 
 ```sh

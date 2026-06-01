@@ -194,6 +194,7 @@ worker.onmessage = (e) => {
     case "log":   appendLog(m.msg); break;
     case "error": appendLog("ERROR: " + m.msg); break;
     case "size":  $("sSize").textContent = (m.bytes / 1e9).toFixed(1) + " GB"; break;
+    case "bufsize": $("bufMB").value = (m.bytes / 1e6).toFixed(2); break;
     case "built": appendLog("calibration done @ " + (m.bytes / 1e9).toFixed(1) + " GB"); break;
     case "monitoring":
       monitoring = true;
@@ -263,8 +264,12 @@ $("build").onclick = () => {
     maxBytes: maxBytes,
     threshUs: parseFloat($("threshUs").value),
     readSize: Math.round(parseFloat($("readKB").value) * 1024),
+    bufferBytes: Math.round(parseFloat($("bufMB").value) * 1e6),
+    autoTune: ch === "cache" && $("bufAuto").checked,
   });
-  appendLog(ch === "flush" ? "building (write-flush channel)..." : "building...");
+  appendLog(ch === "flush" ? "building (write-flush channel)..."
+          : ch === "cache" ? "building (cache-occupancy channel)..."
+          : "building...");
 };
 $("stop").onclick = () => worker.postMessage({ cmd: "stop" });
 $("reset").onclick = () => worker.postMessage({ cmd: "reset" });
