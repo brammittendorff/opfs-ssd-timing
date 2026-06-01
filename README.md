@@ -17,6 +17,12 @@ include the covert channel.
 
 > For testing on your own hardware, for research/education. Don't deploy against others.
 
+## Demo
+
+Live SSD-contention monitor reacting to disk activity:
+
+https://github.com/brammittendorff/opfs-ssd-timing/raw/main/videos/opfs-ssd-timing.mp4
+
 ## How does this work? (plain English)
 
 Your computer has one main storage drive (an SSD). Everything that reads or writes
