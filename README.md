@@ -4,6 +4,8 @@ A local, self-contained proof-of-concept of the core mechanism from
 **FROST: Fingerprinting Remotely using OPFS-based SSD Timing**
 (Weissteiner, Weiser, Czerny, Neela, Rauscher, Juffinger, Gruss - TU Graz).
 
+[FROST](https://hannesweissteiner.com/pdfs/frost.pdf)
+
 Pure JavaScript in a browser tab measures **SSD contention** by timing random reads on
 a large [OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)
 file. No native code, no exploit, no permission prompt. When anything else on the
