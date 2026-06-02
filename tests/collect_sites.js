@@ -28,6 +28,9 @@ const DEFAULT_SITES = [
   'https://www.bbc.com/',
   'https://www.wired.com/',
   'https://www.nytimes.com/',
+  'https://www.lenovo.com/',     // (thinkpad.com redirects here)
+  'https://www.youtube.com/',
+  'https://www.reddit.com/',
 ];
 const SITES = process.env.SITES
   ? process.env.SITES.split(',').map(s => s.trim()).filter(Boolean)

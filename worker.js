@@ -57,6 +57,36 @@ async function getDir() {
   return await navigator.storage.getDirectory();
 }
 
+// Always release the access handle. flush() can THROW on a handle left in a bad state
+// (after an abort or a quota error); if it does, close() must STILL run - otherwise the
+// handle leaks and the next createSyncAccessHandle fails forever with "another open
+// Access Handle". So flush() and close() get separate try blocks.
+function closeHandle() {
+  if (!handle) return;
+  try { handle.flush(); } catch (e) {}
+  try { handle.close(); } catch (e) {}
+  handle = null;
+}
+
+// Open the OPFS file's sync access handle, retrying briefly if a previous handle is
+// still releasing (the close above can lag a moment in some browsers).
+async function openHandle() {
+  const dir = await getDir();
+  const fh = await dir.getFileHandle(FILE_NAME, { create: true });
+  for (let attempt = 0; ; attempt++) {
+    try { return await fh.createSyncAccessHandle(); }
+    catch (e) {
+      const stuck = /another open|already.*open|Access Handle/i.test((e && e.message) || "");
+      if (stuck && attempt < 4) {
+        log("a previous access handle is still open - waiting for it to close...");
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 // One timed random 4 kB-aligned read. Returns latency in microseconds.
 function timedRead() {
   const slots = Math.max(1, Math.floor(fileSize / readSize));
@@ -172,9 +202,81 @@ async function autoTuneCacheBuffer() {
   return chosen;
 }
 
+// ---- robust, generic knee detection (slow-read fraction) --------------------
+// Goal: decide whether random reads over the whole file are actually hitting the SSD,
+// reliably across devices (different timer resolution, OPFS impl, cache size). The
+// median is useless (coarse timer floors it; cache-warm restarts read fast and the old
+// code re-grew the file every rebuild: 12 -> 21 -> 24 GB). Throughput ratio is noisy
+// when everything is cached. The robust signal is the FRACTION of reads that are clearly
+// slower than this device's own cached baseline - i.e. the SSD-miss rate:
+//   1. baseline probe over a tiny (definitely-cached) working set -> the device's "fast".
+//   2. a read counts as a MISS if it is > max(3x baseline p95, MIN_SLOW_US).
+//   3. whole-file random probe -> missFrac = fraction of reads that are misses.
+// missFrac ~0 => file fits in RAM (no knee, channel can't work here); missFrac high =>
+// reads hit the SSD. If even the tiny baseline is already SSD-slow, OPFS isn't being
+// page-cached on this box, so the channel works at any size (uncached=true).
+const MISS_FRAC = 0.30;                       // >=30% of reads hitting the SSD = past the knee
+const MIN_SLOW_US = 20;                        // a read slower than this is an SSD miss, not cache
+const BASELINE_BYTES = 16 * 1024 * 1024;       // "definitely cached" baseline working set
+
+function pctl(arr, p) {
+  const a = Array.prototype.slice.call(arr).sort((x, y) => x - y);
+  return a[Math.min(a.length - 1, Math.floor(p * a.length))];
+}
+
+function probeRange(rangeBytes) {
+  const slots = Math.max(1, Math.floor(rangeBytes / readSize));
+  const lat = new Float64Array(PROBE_READS);
+  const t0 = performance.now();
+  for (let i = 0; i < PROBE_READS; i++) {
+    const off = Math.floor(Math.random() * slots) * readSize;
+    const a = performance.now();
+    handle.read(readBuf, { at: off });
+    lat[i] = (performance.now() - a) * 1000;
+  }
+  const elapsedMs = performance.now() - t0;
+  return { lat, thr: (PROBE_READS / Math.max(elapsedMs, 1e-3)) * 1000 };
+}
+
+function kneeProbe() {
+  const base = probeRange(Math.min(fileSize, BASELINE_BYTES));   // cached baseline (fast)
+  const full = probeRange(fileSize);                             // random over the whole file
+  const baseMed = pctl(base.lat, 0.5);
+  const baseP95 = pctl(base.lat, 0.95);
+  const slowUs = Math.max(baseP95 * 3, MIN_SLOW_US);             // a read this slow = SSD miss
+  let miss = 0;
+  for (let i = 0; i < full.lat.length; i++) if (full.lat[i] > slowUs) miss++;
+  return {
+    missFrac: miss / full.lat.length,
+    slowUs,
+    fullMed: pctl(full.lat, 0.5),
+    fullThr: full.thr,
+    // "uncached" judged by the baseline MEDIAN (the typical read), not p95: a real
+    // uncached device has ALL reads SSD-slow, whereas a cached device with a couple of
+    // transient slow reads still has a fast median - so this won't false-positive on noise.
+    uncached: baseMed >= MIN_SLOW_US,
+  };
+}
+
 // ---- calibration: grow + probe until reads stop being cache-served ----------
+let building = false;
 async function build(opts) {
+  // A second Build click must not race the first: two concurrent createSyncAccessHandle
+  // calls trigger "another open Access Handle". Signal any running build/monitor to abort
+  // and wait for it to release the handle before proceeding.
+  if (building) {
+    abortBuild = true; running = false;
+    for (let i = 0; i < 400 && building; i++) await new Promise((r) => setTimeout(r, 10));
+  }
+  building = true;
+  try { await buildImpl(opts); }
+  finally { building = false; }
+}
+
+async function buildImpl(opts) {
   abortBuild = false;
+  running = false;
+  closeHandle();                 // release any handle from a previous session/build/monitor
   readSize = opts.readSize;
   readBuf = new Uint8Array(readSize);
 
@@ -186,7 +288,6 @@ async function build(opts) {
   // Cache-occupancy channel: no OPFS file at all. Allocate the LLC-sized buffer,
   // wire up the pointer-chase, and go straight to monitoring - no fill, no knee.
   if (channel === "cache") {
-    if (handle) { try { handle.flush(); handle.close(); } catch (e) {} handle = null; }
     let bytes;
     if (opts.autoTune) {
       bytes = await autoTuneCacheBuffer();
@@ -205,13 +306,7 @@ async function build(opts) {
     return;
   }
 
-  // Release any handle left open by a previous build/monitor session, otherwise
-  // createSyncAccessHandle throws ("another open Access Handle ... same file").
-  if (handle) { try { handle.flush(); handle.close(); } catch (e) {} handle = null; }
-
-  const dir = await getDir();
-  const fh = await dir.getFileHandle(FILE_NAME, { create: true });
-  handle = await fh.createSyncAccessHandle();
+  handle = await openHandle();   // retries if a prior handle is still releasing
   fileSize = handle.getSize();
   log(`opened OPFS file, current size ${(fileSize / 1e9).toFixed(2)} GB`);
 
@@ -243,12 +338,13 @@ async function build(opts) {
   // If the existing file already reads at SSD latency, it was calibrated in a
   // previous session - skip the (slow, SSD-wearing) fill and just continue.
   if (fileSize >= readSize) {
-    const probe = new Array(PROBE_READS);
-    for (let i = 0; i < PROBE_READS; i++) probe[i] = timedRead();
-    const med = median(probe);
-    log(`existing file ${(fileSize / 1e9).toFixed(1)} GB, probe median ${med.toFixed(1)} us`);
-    if (med >= threshUs) {
-      log(`already past the knee - continuing without growing the file`);
+    const k = kneeProbe();
+    const past = k.uncached || k.missFrac >= MISS_FRAC || k.fullMed >= threshUs;
+    log(`existing file ${(fileSize / 1e9).toFixed(1)} GB: ` + (k.uncached
+        ? `reads are SSD-slow at every size (OPFS not page-cached here, median ${k.fullMed.toFixed(0)} us)`
+        : `${(k.missFrac * 100).toFixed(0)}% of reads hit the SSD (>${k.slowUs.toFixed(0)} us), median ${k.fullMed.toFixed(0)} us`));
+    if (past) {
+      log(`already past the knee - continuing WITHOUT growing the file`);
       postMessage({ type: "built", bytes: fileSize });
       startMonitor();
       return;
@@ -315,17 +411,20 @@ async function build(opts) {
       break;
     }
 
-    // Probe: random reads across the whole file, take the median.
-    const samples = new Array(PROBE_READS);
-    for (let i = 0; i < PROBE_READS; i++) samples[i] = timedRead();
-    const med = median(samples);
-    log(`size ${(fileSize / 1e9).toFixed(1).padStart(5)} GB -> probe median ` +
-        `${med.toFixed(1)} us ${med >= threshUs ? ">" : ""}`);
+    // Probe: what fraction of random reads over the whole file actually hit the SSD?
+    const k = kneeProbe();
+    const past = k.uncached || k.missFrac >= MISS_FRAC || k.fullMed >= threshUs;
+    const desc = k.uncached
+      ? `reads are SSD-slow at every size (OPFS not page-cached here, median ${k.fullMed.toFixed(0)} us)`
+      : past
+        ? `${(k.missFrac * 100).toFixed(0)}% of reads hit the SSD - past the knee`
+        : `${(k.missFrac * 100).toFixed(0)}% of reads hit the SSD (need >=${(MISS_FRAC * 100).toFixed(0)}%; ` +
+          `the file must grow past your free RAM - keep this build running, do not Stop)`;
+    log(`size ${(fileSize / 1e9).toFixed(1).padStart(5)} GB -> ${desc}${past ? " <" : ""}`);
 
-    if (med >= threshUs) {
+    if (past) {
       if (++over >= DEBOUNCE) {
-        log(`KNEE reached: reads now hit the SSD (median ${med.toFixed(1)} us >= ` +
-            `${threshUs} us) at ${(fileSize / 1e9).toFixed(1)} GB. Stopping fill.`);
+        log(`KNEE reached at ${(fileSize / 1e9).toFixed(1)} GB - ${desc}. Stopping fill.`);
         break;
       }
     } else {
@@ -333,6 +432,7 @@ async function build(opts) {
     }
   }
 
+  if (abortBuild) { closeHandle(); return; }   // stopped mid-build: release, don't monitor
   postMessage({ type: "built", bytes: fileSize });
   startMonitor();
 }
@@ -376,9 +476,9 @@ function loop() {
 }
 
 async function reset() {
-  running = false;
+  running = false; abortBuild = true;
   chase = null; nLines = 0;          // drop the cache-occupancy buffer
-  if (handle) { try { handle.close(); } catch (e) {} handle = null; }
+  closeHandle();
   try {
     const dir = await getDir();
     await dir.removeEntry(FILE_NAME);
@@ -396,9 +496,10 @@ onmessage = async (e) => {
     if (m.cmd === "build") await build(m);
     else if (m.cmd === "stop") {
       running = false; abortBuild = true;
-      // Close the handle so OPFS durably commits the file's size - otherwise the
-      // calibrated file reverts to its last cleanly-closed size on reload.
-      if (handle) { try { handle.flush(); handle.close(); } catch (e) {} handle = null; }
+      // If a build is in progress, let IT release the handle as it unwinds (closing it
+      // here would race its writes). If only monitoring, close it now so OPFS durably
+      // commits the file size (else it reverts to the last cleanly-closed size on reload).
+      if (!building) closeHandle();
       postMessage({ type: "stopped" });
     }
     else if (m.cmd === "reset") await reset();

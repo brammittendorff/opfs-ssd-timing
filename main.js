@@ -250,12 +250,14 @@ $("build").onclick = () => {
   if (!checkEnv()) { appendLog("environment not ready - see banner"); return; }
   clearTrace(); recent = []; total = 0; viewLen = 0; viewHead = 0; t0 = performance.now();
   const ch = $("channel").value;
-  let maxBytes = Math.round(parseFloat($("maxGB").value) * 1e9);
-  // Don't ask for more than the browser will grant (Firefox ~10 GB) - the write
-  // would throw QuotaExceededError mid-fill. Leave 5% headroom.
-  if (ch === "read" && opfsQuotaBytes && maxBytes > opfsQuotaBytes * 0.95) {
-    maxBytes = Math.floor(opfsQuotaBytes * 0.95);
-    appendLog(`max size clamped to ${(maxBytes / 1e9).toFixed(1)} GB (OPFS quota ~${(opfsQuotaBytes / 1e9).toFixed(0)} GB)`);
+  const maxBytes = Math.round(parseFloat($("maxGB").value) * 1e9);
+  // Do NOT clamp to the reported quota: navigator.storage.estimate() is deliberately
+  // conservative and the browser often grants more, so clamping can stop the file short
+  // of free RAM (no knee). Let the worker grow up to your Max size; if the browser truly
+  // refuses, it throws QuotaExceededError mid-fill, which the worker catches and stops on.
+  if (ch === "read" && opfsQuotaBytes && maxBytes > opfsQuotaBytes) {
+    appendLog(`note: Max ${(maxBytes / 1e9).toFixed(0)} GB exceeds the estimated OPFS quota (~${(opfsQuotaBytes / 1e9).toFixed(0)} GB) - ` +
+              `will grow until the browser refuses (handled gracefully).`);
   }
   worker.postMessage({
     cmd: "build",

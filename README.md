@@ -79,8 +79,9 @@ Open **http://localhost:8000** in Google Chrome (recommended) or Firefox.
   is easy to reach.
 - **Firefox** works too, but caps OPFS at ~10 GB/origin. If that is smaller than your free
   RAM the read-latency knee is unreachable - use the **write-flush** channel instead (see
-  [Channels](#channels)), which needs no large file. The Max-size field is auto-clamped to
-  the detected quota, and a mid-fill quota error is handled gracefully.
+  [Channels](#channels)), which needs no large file. The Max-size field is **not** clamped to
+  the (conservative) quota estimate - it grows toward your Max and a mid-fill quota error is
+  handled gracefully, so you can use all the space the browser actually grants.
 - The COOP/COEP headers (set by `serve.py`) make the page *cross-origin isolated*, which
   unlocks the high-resolution `performance.now()` timer the attack needs. Opening the
   HTML file directly (`file://`) will **not** work - the timer stays coarsened.
@@ -92,11 +93,16 @@ Open **http://localhost:8000** in Google Chrome (recommended) or Firefox.
 2. Pick a **Channel** (see [Channels](#channels) - `cache-occupancy` is the zero-setup
    option that works on any machine; `read` is the paper's method but needs OPFS quota >
    free RAM). Click **Build & calibrate**. In `read` mode the worker grows an OPFS file
-   2 GB at a time and, after each step, probes read latency:
-   - While the file fits in the OS page cache, the median stays at DRAM speed (a few us).
-   - Once the file exceeds available cache, the median **jumps** to SSD speed (tens-
-     hundreds of us). That knee is detected and **filling stops automatically** - you
-     don't pay for a fixed 40 GB.
+   1 GB at a time (the **Grow step** field) and, after each step, probes **what fraction of random reads actually
+   hit the SSD** - measured against this machine's own cached baseline, so it's robust to
+   coarse/per-device timers (not a fixed-µs median rule):
+   - While the file fits in free RAM, ~0% of reads hit the SSD (all cache-served) - keep
+     growing. If it reaches the cap still at ~0%, your quota is smaller than RAM and the
+     read channel can't work here (use `cache-occupancy`/`write-flush`).
+   - Once enough reads miss cache and hit the SSD (the **knee**), filling **stops
+     automatically** - and a later **Build** on the same file detects it's already past
+     the knee and does **not** re-grow it. (If even a tiny working set is SSD-slow, OPFS
+     isn't page-cached on your box and the channel works at any size.)
 3. Monitoring starts. With the chart flat-ish, go to another window and **cause disk
    activity**: launch a heavy app, open a fresh browser profile, or `cp` a big file.
    A cluster of spikes appears in the chart. Idle -> it settles. That contrast is the leak.
@@ -108,8 +114,8 @@ Open **http://localhost:8000** in Google Chrome (recommended) or Firefox.
 | Field | Meaning |
 |-------|---------|
 | Grow step (GB) | random data written per calibration step |
-| Knee threshold (us) | median latency that counts as "now hitting the SSD" |
-| Max size (GB) | safety cap; stops growing here even without a clear knee (auto-clamped to the OPFS quota) |
+| Knee threshold (us) | fallback only: a read slower than this also counts as an SSD hit. The primary detector is the **fraction of reads that hit the SSD** vs the cached baseline (device-independent), so this rarely matters |
+| Max size (GB) | safety cap; stops growing here even without a clear knee. **Not** clamped to the quota estimate (that estimate is conservative) - it tries your full value and stops gracefully if the browser refuses |
 | Read size (kB) | per-read size (4 kB matches the paper) |
 | Buffer (MB) | cache-occupancy channel only: working-set size to sweep, ~your CPU's LLC. Ignored when **auto-size** is checked (the default) - the worker probes for your LLC and fills this in |
 | auto-size | cache-occupancy only: probe geometric buffer sizes for the LLC and pick the most sensitive one automatically (on by default, so you don't hand-tune per machine) |
@@ -132,12 +138,15 @@ different things, and write-flush is **browser-dependent**. Pick one in the Chan
 
 **Which channel for which activity (measured by [`tests/`](tests/), not assumed):**
 
-- **read** detects sustained disk I/O dramatically - its read throughput collapses ~95%
-  under a `dd` write - and fingerprints a heavy site (wired.com) at ~93%. It needs the OPFS
-  quota to exceed free RAM, or reads stay cache-served and there's no knee.
-- **cache-occupancy** lights up on CPU/memory contention (sweep median ~×1.4 under
-  CPU/LLC-thrash) and fingerprints wired.com at ~83%. Zero setup, any browser - the
-  portable default for sensing apps/sites.
+- **read** detects sustained disk I/O - its read throughput collapses (~−44% under a `dd`
+  write) - and fingerprints a heavy site (wired.com) at **~81%** (honest grouped CV; random
+  CV reports 91% but that's inflated by session drift - see the trust note under
+  [Tests](#tests)). It needs the OPFS quota to exceed free RAM, or reads stay cache-served
+  and there's no knee.
+- **cache-occupancy** lights up on CPU/memory contention (sweep median ~×2.9 under
+  CPU/LLC-thrash) and fingerprints wired.com at **~97%** grouped CV - and with low drift
+  (idle-null 62%), so that's a genuinely strong, leakage-robust result. Zero setup, any
+  browser - the portable default for sensing apps/sites, and the best fingerprinter here.
 - **write-flush is browser-dependent.** On **Firefox** its `flush()` forces a real
   ~hundreds-of-µs disk writeback, so it detects disk writes (median ~×1.34 under `dd`, no
   big file needed) - this is its intended niche when the quota is too small for `read`. On
@@ -269,17 +278,33 @@ python3 tests/analyze.py cache                            # contention + classif
 Measured findings (one Linux VM; numbers are environment-specific) - see
 [`tests/README.md`](tests/README.md):
 
-| channel | detects contention | fingerprints wired.com |
+| channel | detects contention | fingerprints wired.com (honest **grouped** CV) |
 |---|---|---|
-| **read** | ✅ `dd` write: throughput −82…−95% | ✅ **93% ±9%** (control 47%) |
-| **cache-occupancy** | ✅ CPU/LLC-thrash: median ×4.3 | ✅ **83% ±13%** (control 50%) |
-| **write-flush (Firefox)** | ✅ `dd` write: median ×1.34 | (disk channel - use `read`/`cache` to fingerprint) |
-| **write-flush (Chrome)** | ❌ `flush()` is a no-op | ✅ 83% but only via a faint CPU effect |
+| **read** | ✅ `dd` write: throughput −44% | **81%** grouped (random 91% leaks; idle-null 92%) |
+| **cache-occupancy** | ✅ CPU/LLC-thrash: median ×2.85 | ✅ **97%** grouped (idle-null only 62% → genuinely real, not drift) |
+| **write-flush (Firefox)** | ⚠️ `dd` write: median ×1.27 (borderline) | 59% grouped (not a fingerprint channel) |
+| **write-flush (Chrome)** | ❌ `flush()` is a no-op | n/a |
+
+> **Trust note - temporal leakage.** We report the website classifier under **grouped CV**
+> (train on early windows, test on late) - not random k-fold, which **leaks session/time
+> drift**: an *idle-vs-idle* null control (label idle windows by time alone, no website) can
+> score as high as the real task, proving random CV partly learns *when* a window was captured.
+> Per channel the leakage differs: **read** has heavy drift (random 91% vs grouped 81%, null
+> 92%), so trust the 81%; **cache** has little drift (random 96% vs grouped **97%**, null 62%),
+> so its fingerprint is genuinely strong. `analyze.py` prints all three (random / grouped /
+> null) every run; `tests/eval_cv.py` is the dedicated diagnostic.
+
+> **Leak / overload check.** Recording is heavy (busy probe loops, large traces, many tabs), so
+> `channel_probe.js` samples CPU load, browser+node RSS and live tab-count at 1 Hz and prints a
+> verdict each run. Across all three channels: **no CPU overload** (peak ≤43% of a 16-core box),
+> **no memory leak** (RSS rises with the OPFS read working-set then falls - not monotonic), and
+> **no tab/`dd` leaks** (the `dd` load runs in its own process group with a `timeout` backstop
+> and is killed cleanly - an earlier bug orphaned a 20 GB `dd` that contaminated the baseline).
 
 The story is per-resource and per-browser: `read` = disk (any browser), `cache-occupancy`
 = CPU/memory/website (any browser), `write-flush` = disk **only on Firefox** (where
-`flush()` fsyncs). A light site (nu.nl) sits near the noise floor for the disk channels
-(read ~66%); a heavy site (wired.com) is well above it (read 93%).
+`flush()` fsyncs). A light site (nu.nl) sits near the noise floor for the disk channels;
+a heavy site (wired.com) is detectable - but at the honest ~72% (read), not 93%.
 
 ## How it works
 

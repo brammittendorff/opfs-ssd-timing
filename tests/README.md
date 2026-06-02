@@ -12,10 +12,16 @@ For one channel (`read`, `flush`, or `cache`) a single monitoring session runs t
 1. **Contention** - idle -> heavy load -> idle. Load is `dd ... oflag=direct` (sustained
    real SSD writes) for the SSD channels and 3 CPU/LLC-thrash tabs for cache-occupancy.
    PASS if the busy window separates from idle (throughput drop, or p95/median rise).
-2. **Fingerprint** - `N_WIN` alternating idle / `nu.nl` windows, labeled. PASS if the
-   RandomForest reaches **>= 70%** accuracy *and* clearly beats a **shuffled-label control**
-   (the honest "chance" line). Accuracy is reported as mean +- std over 40 repeats of
-   stratified CV, because a single split on a small set is meaningless.
+2. **Fingerprint** - `N_WIN` alternating idle / site windows, labeled. Accuracy is reported
+   **three ways** so it's honest (see `eval_cv.py`):
+   - *random KFold* - optimistic; **leaks** session/time drift (train & test windows can be
+     temporally adjacent), so it over-states accuracy.
+   - *grouped CV* - the **honest headline**: train on early windows, test on late ones, so the
+     model must generalise across the session rather than memorise drift.
+   - *idle-vs-idle null* - a control that **must** sit at ~chance; if it doesn't, the pipeline
+     is classifying *time*, not the site.
+   PASS = honest **grouped** accuracy >= 70%. (We found random CV inflated read 93% -> grouped
+   72%, with the null at ~94% - i.e. the 93% was mostly drift.)
 
 ## Run
 
@@ -51,12 +57,27 @@ python3 tests/analyze.py flush
 Website fingerprint = idle vs **wired.com** (heavy site), 16 windows/class, RF 5-fold ×40
 reps; a light site (nu.nl) sits near the noise floor for the disk channels.
 
-| channel | browser | contention | website fingerprint |
+| channel | browser | contention | website fingerprint (**grouped** CV = honest) |
 |---------|---------|-----------|---------------------|
-| **read** | Chrome | ✅ `dd` write: throughput −82…−95% | ✅ **93% ±9%** (control 47%) |
-| **cache-occupancy** | Chrome | ✅ CPU/LLC-thrash: median ×4.3 | ✅ **83% ±13%** (control 50%) |
-| **write-flush** | **Firefox** | ✅ `dd` write: idle flush ~480 µs, **median ×1.34** | (disk channel - fingerprint with read/cache) |
-| **write-flush** | Chrome | ❌ `flush()` ~5 µs **no-op** (no fsync) | ✅ 83% but only via a faint CPU effect |
+| **read** | Chrome | ✅ `dd` write: throughput −44% | **81%** grouped (random 91% leaks; idle-null 92%) |
+| **cache-occupancy** | Chrome | ✅ CPU/LLC-thrash: median ×2.85 | ✅ **97%** grouped (idle-null 62% → genuinely real) |
+| **write-flush** | **Firefox** | ⚠️ `dd` write: median ×1.27 (borderline) | 59% grouped (not a fingerprint channel) |
+| **write-flush** | Chrome | ❌ `flush()` ~5 µs **no-op** (no fsync) | n/a |
+
+**Temporal-leakage correction:** website numbers use **grouped CV** (early windows -> late),
+not random k-fold, which **leaks session drift** (an idle-vs-idle null control can score as
+high as the real task). The leakage differs per channel: **read** has heavy drift (random 91%
+vs grouped **81%**, null 92%); **cache** has little (random 96% vs grouped **97%**, null 62%) so
+its fingerprint is genuinely strong. `analyze.py` prints random / grouped / null every run;
+`eval_cv.py` is the dedicated diagnostic.
+
+**Leak / overload check.** Recording is heavy, so `channel_probe.js` samples CPU load,
+browser+node RSS and tab-count at 1 Hz (written to `/tmp/frost-<channel>-resources.json`) and
+prints a verdict. All three channels came back clean: peak CPU ≤43% of a 16-core box (no
+overload), RSS rises with the OPFS read working-set then falls (no monotonic leak), no tab leak,
+`dd` killed cleanly. The harness runs `dd` in its own process group with a `timeout` backstop
+and bounded size - an earlier bug orphaned a 20 GB `dd` that ran ~20 s into later windows and
+inflated results (it's why flush's disk effect was overstated at ×1.34 vs the clean ×1.27).
 
 **The two takeaways:**
 
@@ -75,5 +96,9 @@ tests measure rather than assume - and why cache-occupancy auto-sizes its buffer
 
 | File | Role |
 |------|------|
-| `channel_probe.js` | Playwright driver: build a channel, run contention + fingerprint phases, export CSV + time-marks |
-| `analyze.py` | slice the trace by marks, print contention verdict + repeated-CV classifier accuracy vs a shuffled control |
+| `channel_probe.js` | Playwright driver: build a channel, run contention + fingerprint phases, export CSV + time-marks; also samples CPU/RSS/tabs at 1 Hz and prints a leak/overload verdict |
+| `analyze.py` | slice the trace by marks; print contention verdict + classifier accuracy as random / **grouped** / idle-null |
+| `eval_cv.py` | dedicated temporal-leakage diagnostic (random vs grouped CV + idle-vs-idle null) |
+| `stats.py` | bootstrap CI + permutation p-value + sample-size estimate for the classifier accuracy |
+| `eval_matrix.py` / `matrix.sh` | channel×load detection matrix (AUC / median ratio per cell) |
+| `collect_sites.js` / `eval_multiclass.py` | multi-site closed-world + open-world fingerprinting |
