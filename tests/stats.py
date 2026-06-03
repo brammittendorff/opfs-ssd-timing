@@ -4,9 +4,9 @@ WHY EACH METRIC MATTERS
 ========================
 
 Single-run CV accuracy (what analyze.py reports)
-  Guards against: nothing — it is one point estimate on one dataset with high
+  Guards against: nothing - it is one point estimate on one dataset with high
   variance when N is small (here: 16 windows/class). Two back-to-back runs on
-  the same machine can differ by ±10–15 pp purely from split randomness.
+  the same machine can differ by +-10-15 pp purely from split randomness.
 
 (a) Bootstrap confidence interval on CV accuracy
   Guards against: over-interpreting a lucky split. By resampling windows with
@@ -26,20 +26,20 @@ Single-run CV accuracy (what analyze.py reports)
   real score).
 
 (c) Between-run CI (multi-run aggregator)
-  Guards against: session-specific confounds — a particular OS state, thermal
+  Guards against: session-specific confounds - a particular OS state, thermal
   state, or background process profile that happens to separate idle from nu.nl
   in one session but not in others. Within-dataset CV reuses the same OS state
   for every window, so its variance estimate is too optimistic. A true between-
   run CI requires collecting the CSV K independent times (different OS/browser
   states), computing accuracy on each, and taking the CI of those K numbers.
   When only one run is available, bootstrap pseudo-runs bound the within-session
-  variance but CANNOT bound the between-session variance — they will be too
+  variance but CANNOT bound the between-session variance - they will be too
   narrow. This function documents that limitation explicitly.
 
 (d) Sample-size / power note
   Guards against: planning future experiments with insufficient data. Given the
   observed accuracy and the bootstrap spread, estimates how many windows/class
-  are needed to shrink the 95% CI half-width below a target (default ±5 pp).
+  are needed to shrink the 95% CI half-width below a target (default +-5 pp).
 
 Usage
 -----
@@ -259,7 +259,7 @@ def permutation_test(X, y, n_permutations=500):
 def aggregate_runs(run_path_pairs):
     """Aggregate fingerprint accuracy across multiple independent collection runs.
 
-    DOCSTRING — VALIDITY NOTE
+    DOCSTRING - VALIDITY NOTE
     -------------------------
     A *real* between-run CI requires running channel_probe.js K independent
     times (different browser sessions, OS states, thermal states) and saving
@@ -354,7 +354,7 @@ def sample_size_estimate(real_acc, boot_std, current_n_per_class,
     Two complementary methods:
     1. Bernoulli/binomial: treats each window prediction as a Bernoulli trial.
        n_binom = (1.96 / target_hw)^2 * p * (1-p)
-       This is a lower bound — it assumes perfect cross-validation and ignores
+       This is a lower bound - it assumes perfect cross-validation and ignores
        estimator variance from the finite forest.
     2. Bootstrap-scaled: uses the empirical bootstrap std to project how n must
        grow for the CI to narrow. Assumes std ~ 1/sqrt(n) scaling (CLT).
@@ -380,7 +380,7 @@ def sample_size_estimate(real_acc, boot_std, current_n_per_class,
 # CLI
 # ---------------------------------------------------------------------------
 
-def _hr(char="─", width=64):
+def _hr(char="-", width=64):
     print(char * width)
 
 
@@ -390,9 +390,9 @@ def run_full_report(channel="read"):
     marks_path = f"/tmp/frost-{channel}-marks.json"
 
     print()
-    _hr("═")
-    print(f"  FROST Statistical Report — channel: {channel}")
-    _hr("═")
+    _hr("=")
+    print(f"  FROST Statistical Report - channel: {channel}")
+    _hr("=")
 
     # Load windows
     t0 = time.time()
@@ -416,7 +416,7 @@ def run_full_report(channel="read"):
     print("    Resampling windows with replacement (stratified), 500 resamples...")
     boot = bootstrap_ci(X, y, n_boot=500)
     print(f"    Bootstrap mean accuracy : {boot['mean']*100:.1f}%")
-    print(f"    95% CI (2.5–97.5 pct)  : [{boot['ci_lo']*100:.1f}%, {boot['ci_hi']*100:.1f}%]")
+    print(f"    95% CI (2.5-97.5 pct)  : [{boot['ci_lo']*100:.1f}%, {boot['ci_hi']*100:.1f}%]")
     print(f"    Bootstrap std           : {boot['std']*100:.1f} pp")
     print()
     print("    Interpretation: you'd expect accuracy between "
@@ -434,7 +434,7 @@ def run_full_report(channel="read"):
     sig_str = "YES (p<0.05)" if perm["significant"] else "NO (p>=0.05)"
     print(f"    Real accuracy           : {perm['real_acc']*100:.1f}%")
     print(f"    Null (shuffled) mean    : {perm['null_mean']*100:.1f}% "
-          f"± {perm['null_std']*100:.1f}% std")
+          f"+- {perm['null_std']*100:.1f}% std")
     print(f"    p-value                 : {perm['pvalue']:.4f}")
     print(f"    Significant (p<0.05)?   : {sig_str}")
     print()
@@ -447,7 +447,7 @@ def run_full_report(channel="read"):
 
     # ---- (c) Multi-run aggregator (pseudo-run mode) ----
     _hr()
-    print("(c) BETWEEN-RUN CI (pseudo-run mode — one CSV available)")
+    print("(c) BETWEEN-RUN CI (pseudo-run mode - one CSV available)")
     _hr()
     agg = aggregate_runs([(csv_path, marks_path)])
     print(f"    Mode: {agg['mode']}")
@@ -475,31 +475,31 @@ def run_full_report(channel="read"):
         target_half_width=0.05,
     )
     print(f"    Current windows/class   : {ss['current_n_per_class']}")
-    print(f"    Target CI half-width    : ±{ss['target_half_width']*100:.0f} pp")
+    print(f"    Target CI half-width    : +-{ss['target_half_width']*100:.0f} pp")
     print(f"    Binomial estimate       : {ss['n_binom']:.0f} windows/class")
     print(f"    Bootstrap-scaled est.   : {ss['n_scaled']:.0f} windows/class")
     print(f"    Recommended (max)       : {ss['recommended']:.0f} windows/class")
     if ss["already_sufficient"]:
         print(f"    Status: current n={ss['current_n_per_class']} is already sufficient "
-              f"for ±{ss['target_half_width']*100:.0f}% CI.")
+              f"for +-{ss['target_half_width']*100:.0f}% CI.")
     else:
         deficit = int(np.ceil(ss["recommended"])) - ss["current_n_per_class"]
         print(f"    Status: need ~{deficit} more windows/class "
-              f"to achieve ±{ss['target_half_width']*100:.0f}% CI.")
+              f"to achieve +-{ss['target_half_width']*100:.0f}% CI.")
 
     # ---- Summary ----
-    _hr("═")
+    _hr("=")
     print("SUMMARY")
-    _hr("═")
+    _hr("=")
     elapsed = time.time() - t0
     print(f"  Channel           : {channel}")
     print(f"  Windows/class     : {n_per_class}")
     print(f"  Real CV accuracy  : {perm['real_acc']*100:.1f}%")
     print(f"  Bootstrap 95% CI  : [{boot['ci_lo']*100:.1f}%, {boot['ci_hi']*100:.1f}%]")
     print(f"  Permutation p     : {perm['pvalue']:.4f}  ({'significant' if perm['significant'] else 'NOT significant'})")
-    print(f"  Windows needed    : ~{int(np.ceil(ss['recommended']))} / class for ±5% CI")
+    print(f"  Windows needed    : ~{int(np.ceil(ss['recommended']))} / class for +-5% CI")
     print(f"  Analysis time     : {elapsed:.0f}s")
-    _hr("═")
+    _hr("=")
     print()
 
     return {

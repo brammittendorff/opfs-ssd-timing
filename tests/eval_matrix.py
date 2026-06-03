@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""eval_matrix.py — analyse the channel×load detection matrix.
+"""eval_matrix.py - analyse the channelxload detection matrix.
 
 For each /tmp/matrix-<channel>-<load>.csv + .json cell that exists, this
 script slices the raw latency samples into idle and load windows using the
-contention marks (c_idle1→c_load, c_load→c_load_end, c_idle2→c_end), then
+contention marks (c_idle1->c_load, c_load->c_load_end, c_idle2->c_end), then
 computes three detection metrics:
 
-  median_ratio   — median(load) / median(idle)   — how much load shifts the
+  median_ratio   - median(load) / median(idle)   - how much load shifts the
                    central tendency.
-  throughput_pct — (count_load/dur_load - count_idle/dur_idle) /
-                   count_idle/dur_idle * 100  — rate change under load.
-  AUC            — P(load sample > idle sample), the threshold-free effect
+  throughput_pct - (count_load/dur_load - count_idle/dur_idle) /
+                   count_idle/dur_idle * 100  - rate change under load.
+  AUC            - P(load sample > idle sample), the threshold-free effect
                    size equivalent to the Mann-Whitney U / Cliff's delta.
-                   AUC ≈ 0.5 → no separation; →1 load is higher; →0 load
+                   AUC ~ 0.5 -> no separation; ->1 load is higher; ->0 load
                    is lower.  Implemented via rank-based formula; no scipy.
 
 The AUC is the headline number: it tells a reader at a glance which
@@ -22,7 +22,7 @@ Usage:
     python3 tests/eval_matrix.py [--csv-dir /tmp]
 
 Output:
-    Per-cell detail lines, then a tidy channel×load matrix of AUC and
+    Per-cell detail lines, then a tidy channelxload matrix of AUC and
     median-ratio values.
 """
 
@@ -67,7 +67,7 @@ def auc_mw(a: np.ndarray, b: np.ndarray) -> float:
 
     Returns
     -------
-    float in [0, 1] — P(load > idle)
+    float in [0, 1] - P(load > idle)
     """
     if len(a) == 0 or len(b) == 0:
         return float("nan")
@@ -104,7 +104,7 @@ def load_cell(csv_path: str, json_path: str):
     """Load a cell's CSV and marks JSON.
 
     Returns (timestamps_ms, latencies_us, marks_dict).
-    marks_dict maps name→t_ms.
+    marks_dict maps name->t_ms.
     """
     data = np.genfromtxt(csv_path, delimiter=",", skip_header=1)
     if data.ndim == 1:
@@ -122,7 +122,7 @@ def load_cell(csv_path: str, json_path: str):
 def slice_contention(timestamps, latencies, marks):
     """Slice samples into idle and load windows from contention marks.
 
-    idle = [c_idle1, c_load) ∪ [c_idle2, c_end)
+    idle = [c_idle1, c_load) + [c_idle2, c_end)
     load = [c_load, c_load_end)
 
     Returns (idle_lat, load_lat, idle_dur_ms, load_dur_ms).
@@ -253,7 +253,7 @@ def main():
         sys.exit(1)
 
     print("=" * 70)
-    print("FROST channel×load detection matrix")
+    print("FROST channelxload detection matrix")
     print("=" * 70)
     print(f"Data directory : {csv_dir}")
     print(f"Cells found    : {len(available)}")
@@ -267,17 +267,17 @@ def main():
             if key not in available:
                 results[key] = None
                 continue
-            print(f"--- {ch} × {ld} ---")
+            print(f"--- {ch} x {ld} ---")
             r = analyse_cell(ch, ld, csv_dir)
             results[key] = r
             if r:
-                print(f"  n_idle={r['n_idle']:6d}  med_idle={r['med_idle_us']:8.1f} µs")
-                print(f"  n_load={r['n_load']:6d}  med_load={r['med_load_us']:8.1f} µs")
+                print(f"  n_idle={r['n_idle']:6d}  med_idle={r['med_idle_us']:8.1f} us")
+                print(f"  n_load={r['n_load']:6d}  med_load={r['med_load_us']:8.1f} us")
                 print(f"  median_ratio   = {r['median_ratio']:.4f}x  "
-                      f"({'↑ load higher' if r['median_ratio'] > 1 else '↓ load lower'})")
+                      f"({' load higher' if r['median_ratio'] > 1 else ' load lower'})")
                 print(f"  throughput_pct = {r['throughput_pct']:+.1f}%")
                 print(f"  AUC            = {r['auc']:.4f}  "
-                      f"(0.5=random, →1 load higher latency, →0 load lower latency)")
+                      f"(0.5=random, ->1 load higher latency, ->0 load lower latency)")
             print()
 
     # ---- AUC matrix ----
@@ -341,17 +341,17 @@ def main():
     print("=" * 70)
     print("Interpretation")
     print("=" * 70)
-    print("  AUC > 0.70 or < 0.30  — strong detection")
-    print("  AUC > 0.60 or < 0.40  — moderate detection")
-    print("  AUC ≈ 0.50             — no detection (channel blind to this load)")
+    print("  AUC > 0.70 or < 0.30  - strong detection")
+    print("  AUC > 0.60 or < 0.40  - moderate detection")
+    print("  AUC ~ 0.50             - no detection (channel blind to this load)")
     print()
     print("Expected pattern:")
-    print("  read   × dd   — strong (SSD read timing perturbed by disk writes)")
-    print("  read   × burn — weak   (CPU load does not hit SSD read path)")
-    print("  cache  × burn — strong (LLC thrash raises cache-probe latency)")
-    print("  cache  × dd   — weak   (disk I/O alone does not evict LLC)")
-    print("  flush  × dd   — strong (Firefox write-flush timing perturbed by disk)")
-    print("  flush  × burn — weak   (CPU burn alone does not slow flush)")
+    print("  read   x dd   - strong (SSD read timing perturbed by disk writes)")
+    print("  read   x burn - weak   (CPU load does not hit SSD read path)")
+    print("  cache  x burn - strong (LLC thrash raises cache-probe latency)")
+    print("  cache  x dd   - weak   (disk I/O alone does not evict LLC)")
+    print("  flush  x dd   - strong (Firefox write-flush timing perturbed by disk)")
+    print("  flush  x burn - weak   (CPU burn alone does not slow flush)")
 
 
 if __name__ == "__main__":

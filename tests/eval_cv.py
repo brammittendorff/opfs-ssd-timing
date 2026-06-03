@@ -65,7 +65,7 @@ from sklearn.model_selection import (
     cross_val_score,
 )
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# -- Configuration -------------------------------------------------------------
 
 RF_PARAMS = dict(n_estimators=300, random_state=0, n_jobs=-1)
 
@@ -81,7 +81,7 @@ N_BLOCKS_STRICT = 2   # hardest: first-half train, second-half test (and vice ve
 NULL_HALF_LEAKAGE_THRESHOLD = 0.60    # null_half > this -> LEAKAGE SUSPECTED
 GAP_LEAKAGE_THRESHOLD = 0.15         # |random - grouped_strict| > this -> LEAKAGE SUSPECTED
 
-# ── Data loading ──────────────────────────────────────────────────────────────
+# -- Data loading --------------------------------------------------------------
 
 def load_channel(channel: str):
     """Load CSV + marks for one channel; return (all_recs, groups_array).
@@ -141,7 +141,7 @@ def load_channel(channel: str):
     return recs, np.asarray(groups, dtype=int)
 
 
-# ── Feature matrix ────────────────────────────────────────────────────────────
+# -- Feature matrix ------------------------------------------------------------
 
 def prepare_matrix(recs):
     """Return (X, y) with NaN replaced by 0."""
@@ -150,7 +150,7 @@ def prepare_matrix(recs):
     return X, y
 
 
-# ── Scheme (a): random repeated stratified KFold ──────────────────────────────
+# -- Scheme (a): random repeated stratified KFold ------------------------------
 
 def eval_random_cv(X, y, n_splits=None, n_repeats=RANDOM_CV_REPEATS):
     """RepeatedStratifiedKFold with as many splits as the minority class allows."""
@@ -169,7 +169,7 @@ def eval_random_cv(X, y, n_splits=None, n_repeats=RANDOM_CV_REPEATS):
     return scores.mean(), scores.std(), folds
 
 
-# ── Scheme (b): leakage-robust GroupKFold with contiguous time blocks ─────────
+# -- Scheme (b): leakage-robust GroupKFold with contiguous time blocks ---------
 
 def assign_contiguous_blocks(n_samples: int, n_blocks: int) -> np.ndarray:
     """Assign windows to contiguous time-ordered blocks.
@@ -201,7 +201,7 @@ def eval_grouped_cv(X, y, n_blocks: int):
     return scores.mean(), scores.std(), n_blocks
 
 
-# ── Scheme (c): idle-only NULL control ────────────────────────────────────────
+# -- Scheme (c): idle-only NULL control ----------------------------------------
 
 def eval_null_control(recs, n_repeats=RANDOM_CV_REPEATS):
     """Classify idle-only windows with fake temporal labels.
@@ -245,7 +245,7 @@ def eval_null_control(recs, n_repeats=RANDOM_CV_REPEATS):
     return sc_half.mean(), sc_half.std(), sc_alt.mean(), sc_alt.std()
 
 
-# ── Verdict logic ─────────────────────────────────────────────────────────────
+# -- Verdict logic -------------------------------------------------------------
 
 def compute_verdict(
     random_mean,
@@ -286,7 +286,7 @@ def compute_verdict(
     return leakage, reasons
 
 
-# ── Printing helpers ──────────────────────────────────────────────────────────
+# -- Printing helpers ----------------------------------------------------------
 
 _RED    = "\033[31m"
 _GREEN  = "\033[32m"
@@ -302,12 +302,12 @@ def _fmt(mean, std, label=""):
 
 
 def _section(title):
-    print(f"\n{_BOLD}{'─'*60}{_RESET}")
+    print(f"\n{_BOLD}{'-'*60}{_RESET}")
     print(f"{_BOLD}{title}{_RESET}")
-    print(f"{_BOLD}{'─'*60}{_RESET}")
+    print(f"{_BOLD}{'-'*60}{_RESET}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
@@ -324,7 +324,7 @@ def main():
 
     channel = args.channel
 
-    # ── Load data ────────────────────────────────────────────────────────────
+    # -- Load data ------------------------------------------------------------
     print(f"\nLoading channel: {_BOLD}{channel}{_RESET}")
     try:
         recs, groups = load_channel(channel)
@@ -341,7 +341,7 @@ def main():
         print("ERROR: not enough windows to evaluate (need >= 4).")
         sys.exit(1)
 
-    # ── Scheme (a) ───────────────────────────────────────────────────────────
+    # -- Scheme (a) -----------------------------------------------------------
     _section("(a) Random RepeatedStratifiedKFold  [OPTIMISTIC BASELINE]")
     print(
         "  Windows are randomly assigned to folds.  Train and test may include\n"
@@ -350,7 +350,7 @@ def main():
     m_rand, s_rand, folds_a = eval_random_cv(X, y)
     print(f"  {_fmt(m_rand, s_rand, f'{folds_a}-fold x{RANDOM_CV_REPEATS} reps')}")
 
-    # ── Scheme (b) ───────────────────────────────────────────────────────────
+    # -- Scheme (b) -----------------------------------------------------------
     _section(
         "(b) Leakage-robust GroupKFold  [CONTIGUOUS TIME BLOCKS]"
     )
@@ -365,7 +365,7 @@ def main():
     print(f"  {_fmt(m_g4, s_g4, f'{N_BLOCKS_COARSE}-block GroupKFold')}")
     print(f"  {_fmt(m_g2, s_g2, f'{N_BLOCKS_STRICT}-block GroupKFold (half-split, most conservative)')}")
 
-    # ── Scheme (c) ───────────────────────────────────────────────────────────
+    # -- Scheme (c) -----------------------------------------------------------
     _section("(c) Idle-only NULL control  [MUST BE ~CHANCE]")
     print(
         "  Only idle windows are used; labels are fabricated (no real class signal).\n"
@@ -384,7 +384,7 @@ def main():
     print(f"  {_fmt(m_nh, s_nh, 'null_half (random KFold)')}  [target: ~50%]")
     print(f"  {_fmt(m_na, s_na, 'null_alt  (random KFold)')}  [target: ~50%]")
 
-    # ── Verdict ──────────────────────────────────────────────────────────────
+    # -- Verdict --------------------------------------------------------------
     _section("VERDICT")
     leakage, reasons = compute_verdict(m_rand, m_g2, m_nh)
 
@@ -399,7 +399,7 @@ def main():
 
     # Summary table
     print(f"\n  {'Scheme':<45} {'Accuracy':>10}")
-    print(f"  {'─'*57}")
+    print(f"  {'-'*57}")
     print(f"  {'(a) random StratKFold (optimistic)':<45} {_fmt(m_rand, s_rand):>10}")
     print(f"  {'(b) grouped 4-block (coarse temporal gap)':<45} {_fmt(m_g4, s_g4):>10}")
     print(f"  {'(b) grouped 2-block / half-split (max gap)':<45} {_fmt(m_g2, s_g2):>10}")

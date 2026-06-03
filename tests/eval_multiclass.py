@@ -280,7 +280,7 @@ def main():
     print(f"  Macro-F1       : {cw['macro_f1']:.3f}")
     verdict_cw = cw['accuracy'] >= 0.70 or cw['accuracy'] > chance * 1.5
     print(f"  Verdict        : {PASS_COLOR if verdict_cw else FAIL_COLOR}  "
-          f"({'clearly above chance' if verdict_cw else 'near chance — collect more windows or use a stronger channel'})")
+          f"({'clearly above chance' if verdict_cw else 'near chance - collect more windows or use a stronger channel'})")
 
     print("\nConfusion matrix (rows=true, cols=pred):")
     print_confusion_matrix(cw["cm"], class_names)
