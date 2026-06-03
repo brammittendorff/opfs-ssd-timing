@@ -1,89 +1,81 @@
-# FROST PoC — browser SSD & cache timing side channel
+# FROST PoC — browser hardware-timing side channels
 
-A local, self-contained proof-of-concept of **[FROST: Fingerprinting Remotely using
-OPFS-based SSD Timing](https://hannesweissteiner.com/pdfs/frost.pdf)** (Weissteiner et al.,
-TU Graz). Pure JavaScript in a browser tab measures **hardware contention** by timing a
-shared resource — no native code, no exploit, no permission prompt. When anything else on
-the machine touches that resource, the timing spikes, and you watch it live.
+> A web page that works out what *else* your computer is doing — by timing nothing but its
+> own disk and cache access. Pure JavaScript, no permissions, no exploit.
 
-> Research/education on your own hardware. Don't deploy against others. (No covert channel included.)
+![Three channels: contention response + website fingerprint](tests/results.png)
 
-![three channels: contention response + website fingerprint](tests/results.png)
+When a program hammers a shared resource — your SSD, your CPU's cache — everything else using
+it slows down a touch. A sandboxed browser tab can't *see* other programs, but it **can** time
+its own access to those shared resources and watch for the slowdowns. From that timing alone it
+can tell *when* you open an app, load a site, or copy a file — and a classifier can start to
+guess *what*.
+
+This is a local, self-contained PoC of that idea — three such channels plus an offline
+fingerprinting pipeline. Built on **[FROST](https://hannesweissteiner.com/pdfs/frost.pdf)**
+(Weissteiner et al., TU Graz — the OPFS/SSD method) and the **cache-occupancy** channel of
+**[Shusterman et al.](https://www.usenix.org/conference/usenixsecurity19/presentation/shusterman)**
+(USENIX Security 2019).
+
+> ⚠️ Research/education on your own hardware — not for deployment against others. No covert channel included.
 
 ## The three channels
 
-| Channel | Times | Senses | Works on |
+| Channel | What it times | What it senses | Browser |
 |---|---|---|---|
-| **read** *(paper's method)* | random 4 kB reads on a `>RAM` OPFS file | **disk** I/O | Chrome + Firefox (needs OPFS quota > free RAM) |
-| **cache-occupancy** | a sweep of an LLC-sized buffer (pointer-chase) | **CPU / memory / websites** | Chrome + Firefox, no file — **start here** |
-| **write-flush** | `handle.flush()` after a 4 kB write | **disk** writeback | **Firefox only** (Chrome's `flush()` is a no-op) |
+| **read** *(FROST)* | random 4 kB reads of a `>RAM` OPFS file | **disk** I/O | Chrome / Firefox · needs quota > free RAM |
+| **cache-occupancy** | a sweep of an LLC-sized buffer (pointer-chase) | **CPU / memory / websites** | Chrome / Firefox · no file — **start here** |
+| **write-flush** | `flush()` after a 4 kB write | **disk** writeback | **Firefox only** (Chrome's `flush()` is a no-op) |
 
-For *disk* activity use **read** (any browser) or **write-flush** (Firefox); for
-*CPU / memory / websites* use **cache-occupancy** (any browser).
+Rule of thumb: **disk** events → `read` or `write-flush`; **apps & websites** → `cache-occupancy`.
+
+## Quick start
+
+```sh
+python3 serve.py        # http://localhost:8000  (sets the COOP/COEP headers)
+```
+
+1. Open **http://localhost:8000** in Chrome or Firefox. The headers make the page
+   cross-origin-isolated, which unlocks the high-res timer — opening the HTML directly
+   (`file://`) won't work.
+2. Pick a **Channel** (`cache-occupancy` is the zero-setup default) and click **Build & calibrate**.
+3. Cause activity in another window — open a site, launch an app, `cp` a big file. Watch the
+   chart spike; go idle and watch it settle. That contrast is the leak.
+
+▶ [Demo video](https://github.com/brammittendorff/opfs-ssd-timing/raw/main/videos/opfs-ssd-timing.mp4)
 
 ## How it works (plain English)
 
-Your computer's shared parts are like **roads** — when one program uses a road heavily,
-everyone else on it slows down. A website can't see other programs, but it *can* time **its
-own** trips on a shared road and notice the slowdowns. This PoC watches two roads: the
-**SSD** (timing reads of a big OPFS file, or timing a write's flush-to-disk) and the **CPU
-cache** (timing a sweep of a cache-sized buffer). It never sees your files — only the timing.
-From the slowdowns it tells *when* the machine is busy, and the [offline pipeline](analysis/)
-tries to fingerprint *what*.
+Shared parts of your computer are like **roads**: when one program drives heavily on a road,
+everyone else slows down. The page times **its own** trips and notices the slowdowns. It
+watches two roads — the **SSD** (timing reads of a big OPFS file, or how long a write takes to
+flush to disk) and the **CPU cache** (timing a sweep of a cache-sized buffer). It never sees
+your files; it only feels the traffic.
 
-One catch, **`read` only**: the OPFS file must be **bigger than free RAM**, or it stays fully
-cached and never touches the disk. The other two channels have no size requirement.
+> **One catch — `read` only:** the OPFS file must be **bigger than free RAM**, or it stays
+> fully cached and never touches the disk. `cache-occupancy` and `write-flush` have no size
+> requirement.
 
-## Run
+## What's in the box
 
-```sh
-python3 serve.py        # serves http://localhost:8000 with COOP/COEP headers
-```
+- **Live monitor** — `index.html` + `main.js` + `worker.js`: the three channels, adaptive
+  calibration, a dependency-free rolling chart, CSV export.
+- **Capture harness** — record labeled windows of the signal → JSONL.
+- **Fingerprinting** — [`analysis/`](analysis/): feature extraction + RandomForest + 1D-CNN
+  that classify *what* caused the contention.
+- **Tests** — [`tests/`](tests/): drives every channel end-to-end with leakage-robust grouped
+  CV, an idle-vs-idle null control, and a per-run CPU/memory/leak check.
 
-Open **http://localhost:8000** in Chrome or Firefox — the COOP/COEP headers make the page
-cross-origin-isolated, unlocking the high-res timer (`file://` won't work). Pick a
-**Channel**, click **Build & calibrate**, then cause activity in another window and watch the
-chart settle/spike. `cache-occupancy` is the zero-setup default; `read` needs a `>RAM` OPFS
-file (Chrome has the most headroom, Firefox caps OPFS at ~10 GB); `write-flush` is the disk
-channel for Firefox. [Demo video](https://github.com/brammittendorff/opfs-ssd-timing/raw/main/videos/opfs-ssd-timing.mp4).
+## Results (one Linux VM — environment-specific)
 
-## Fingerprinting
+- **cache-occupancy** fingerprints a heavy site (wired.com) at **~88–97%** grouped-CV accuracy.
+- **read** detects a `dd` disk write as a **−80…−95%** read-throughput collapse.
+- **write-flush** is a real disk channel **only on Firefox** (Chrome's `flush()` doesn't fsync).
 
-The live monitor shows *that* the machine is busy; fingerprinting asks *what*. The
-**Capture** panel records labeled windows → JSONL, and the [`analysis/`](analysis/) pipeline
-(RandomForest + 1D-CNN) classifies them. See [`analysis/README.md`](analysis/README.md).
-
-## Tests & results
-
-[`tests/`](tests/) drives each channel end-to-end and checks it (a) detects contention and
-(b) fingerprints a website — using leakage-robust **grouped CV**, an idle-vs-idle null
-control, and a per-run CPU/memory/leak check. Measured on one Linux VM (environment-specific):
-cache-occupancy fingerprints wired.com at **~88–97% grouped CV**; `read` detects `dd` writes
-(throughput **−80…−95%**); `write-flush` works as a disk channel **only on Firefox**. Full
-numbers, methodology and the figure above: [`tests/README.md`](tests/README.md).
-
-## UI fields
-
-- **Grow step / Max size / Read size** — `read` channel: how fast/large the file grows, and
-  per-read size. Max is **not** clamped to the quota estimate (that estimate is conservative).
-- **Buffer (MB) / auto-size** — `cache` channel: working-set size; **auto-size** (default)
-  finds your LLC, so you don't tune by hand.
-- **Knee threshold** — vestigial fallback; the real `read` detector is "% of reads that hit
-  the SSD", measured against the device's own cached baseline (timer-resolution-independent).
+Methodology, full numbers and the figure above: **[`tests/README.md`](tests/README.md)**.
 
 ## Caveats
 
-- **Single SSD assumed** — activity on a *different* physical disk than the browser's OPFS
-  won't register (paper's stated limitation).
-- **Real disk I/O** — `read` writes many GB on first build (some SSD wear); **Reset** removes
-  the file.
-- **Mitigation (paper):** cap OPFS to ~1 GB → the file fits in RAM → the `read` channel
-  disappears.
-
-## How it's built
-
-- `serve.py` — static server adding COOP/COEP (cross-origin isolation).
-- `worker.js` — the three channels (OPFS reads / `flush()` / LLC pointer-chase sweep) in a
-  Web Worker, with adaptive calibration.
-- `index.html` + `main.js` — controls, live `<canvas>` chart, CSV export, labeled-capture harness.
-- `analysis/` — offline feature extraction + classifiers. `tests/` — end-to-end test suite.
+- **One disk assumed** — activity on a *different* physical disk than the browser's OPFS won't register.
+- **Real I/O** — `read` writes many GB on first build (some SSD wear); **Reset** removes the file.
+- **Mitigation (paper):** cap OPFS to ~1 GB so the file fits in RAM → the `read` channel disappears.
